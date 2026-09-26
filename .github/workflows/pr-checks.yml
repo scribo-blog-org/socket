@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   deployments: write
+  pull-requests: write
 
 jobs:
   check:
@@ -20,6 +21,11 @@ jobs:
       # Код репозитория на раннере
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Show checks
+        uses: ./.github/actions/pr-steps
+        with:
+          step: init
 
       - name: Building
         id: deployment
@@ -41,16 +47,60 @@ jobs:
         run: npm ci
 
       # Линтера в репозитории нет: в package.json стоит плейсхолдер с кодом 0
+      - name: Lint running
+        uses: ./.github/actions/pr-steps
+        with:
+          step: lint
+          state: running
+
       - name: Lint
+        id: lint
         run: npm run lint
 
+      - name: Lint status
+        if: steps.lint.outcome == 'success' || steps.lint.outcome == 'failure'
+        uses: ./.github/actions/pr-steps
+        with:
+          step: lint
+          state: ${{ steps.lint.outcome }}
+
       # Тестов нет: в package.json стоит плейсхолдер с кодом 0
+      - name: Test running
+        if: success()
+        uses: ./.github/actions/pr-steps
+        with:
+          step: test
+          state: running
+
       - name: Test
+        id: test
         run: npm run test
 
+      - name: Test status
+        if: steps.test.outcome == 'success' || steps.test.outcome == 'failure'
+        uses: ./.github/actions/pr-steps
+        with:
+          step: test
+          state: ${{ steps.test.outcome }}
+
       # Сборка по локальному Dockerfile. В registry ничего не уходит
+      - name: Build running
+        if: success()
+        uses: ./.github/actions/pr-steps
+        with:
+          step: build
+          state: running
+
       - name: Docker build
+        id: build
         run: docker build -t "${{ github.repository }}:pr-${{ github.event.number }}" .
+
+      - name: Build status
+        if: steps.build.outcome == 'success' || steps.build.outcome == 'failure'
+        uses: ./.github/actions/pr-steps
+        with:
+          step: build
+          state: ${{ steps.build.outcome }}
 
       - name: Ready
         if: success()
