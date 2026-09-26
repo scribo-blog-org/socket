@@ -1,0 +1,93 @@
+name: PR step status
+description: Обновляет в pull request таблицу шагов Lint, Test и Build.
+
+inputs:
+  step:
+    description: init, lint, test или build
+    required: true
+  state:
+    description: waiting, running, success или failure. Для init не нужен.
+    required: false
+    default: waiting
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/github-script@v7
+      with:
+        script: |
+          const step = "${{ inputs.step }}";
+          const nextState = "${{ inputs.state }}";
+          const pullRequest = context.payload.pull_request;
+          if (!pullRequest) return;
+
+          const steps = ["lint", "test", "build"];
+          const labels = { lint: "Lint", test: "Test", build: "Build" };
+          const text = {
+            waiting: "⚪ Ожидание",
+            running: "🟡 В процессе",
+            success: "🟢 Успешно",
+            failure: "🔴 Ошибка",
+          };
+          const marker = "<!-- scribo-deployment";
+
+          function readState(body) {
+            const state = { lint: "waiting", test: "waiting", build: "waiting" };
+            const match = body?.match(/<!-- scribo-deployment ([^>]*?)-->/);
+            if (!match) return state;
+            for (const part of match[1].trim().split(/\s+/)) {
+              const [key, value] = part.split("=");
+              if (state[key] && text[value]) state[key] = value;
+            }
+            return state;
+          }
+
+          function render(state) {
+            const encoded = steps.map((name) => `${name}=${state[name]}`).join(" ");
+            const rows = steps
+              .map((name) => `| ${labels[name]} | ${text[state[name]]} |`)
+              .join("\n");
+            return [
+              `<!-- scribo-deployment ${encoded} -->`,
+              "### Checks",
+              "",
+              "| Шаг | Статус |",
+              "| --- | --- |",
+              rows,
+              "",
+            ].join("\n");
+          }
+
+          const { owner, repo } = context.repo;
+          const { data: comments } = await github.rest.issues.listComments({
+            owner,
+            repo,
+            issue_number: pullRequest.number,
+            per_page: 100,
+          });
+          const existing = comments.find((comment) => comment.body?.includes(marker));
+          const state = readState(existing?.body);
+          if (step !== "init") {
+            if (!steps.includes(step) || !text[nextState]) {
+              core.setFailed(`Unknown step status: ${step}=${nextState}`);
+              return;
+            }
+            state[step] = nextState;
+          }
+
+          const body = render(state);
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: existing.id,
+              body,
+            });
+            return;
+          }
+          await github.rest.issues.createComment({
+            owner,
+            repo,
+            issue_number: pullRequest.number,
+            body,
+          });
