@@ -79,7 +79,7 @@ jobs:
           ssh-keygen -l -f "$keyfile"
           rm -f "$keyfile"
 
-      # На сервере сервис compose называется socket. Обновляем SOCKET_TAG и перезапускаем только его
+      # На сервере образ socket закреплён как :latest. Отдельного .env с тегом нет.
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -88,6 +88,5 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /opt/scribo &&
-            sed -i "s/^SOCKET_TAG=.*/SOCKET_TAG=${{ github.sha }}/" .env &&
             docker compose pull socket &&
             docker compose up -d socket
