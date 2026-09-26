@@ -1,0 +1,95 @@
+name: Deployment status
+description: Записывает статус Building, Ready или Error в Deployments этого репозитория.
+
+inputs:
+  state:
+    description: Building, Ready или Error
+    required: true
+  service:
+    description: Имя сервиса в таблице
+    required: true
+  environment:
+    description: Production или Preview
+    required: true
+  deployment_id:
+    description: Уже созданный deployment. Пусто, если статус первый.
+    required: false
+    default: ""
+  url:
+    description: Адрес сайта для статуса Ready
+    required: false
+    default: ""
+
+outputs:
+  deployment_id:
+    description: Id deployment в GitHub
+    value: ${{ steps.status.outputs.deployment_id }}
+
+runs:
+  using: composite
+  steps:
+    - id: status
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const stateLabel = "${{ inputs.state }}";
+          const service = "${{ inputs.service }}";
+          const environment = "${{ inputs.environment }}";
+          const siteUrl = "${{ inputs.url }}";
+          let deploymentId = "${{ inputs.deployment_id }}";
+
+          const apiState = stateLabel === "Building"
+            ? "in_progress"
+            : stateLabel === "Ready"
+              ? "success"
+              : "failure";
+
+          const { owner, repo } = context.repo;
+          const logUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+          const ref = context.payload.pull_request?.head?.sha || context.sha;
+
+          if (!deploymentId) {
+            const created = await github.rest.repos.createDeployment({
+              owner,
+              repo,
+              ref,
+              environment,
+              auto_merge: false,
+              required_contexts: [],
+              description: stateLabel,
+              production_environment: environment === "Production",
+              transient_environment: environment !== "Production",
+            });
+            if (!created.data.id) {
+              core.setFailed("GitHub did not create a deployment");
+              return;
+            }
+            deploymentId = String(created.data.id);
+          }
+
+          const status = {
+            owner,
+            repo,
+            deployment_id: Number(deploymentId),
+            state: apiState,
+            description: stateLabel,
+            log_url: logUrl,
+            auto_inactive: apiState === "success",
+          };
+          if (apiState === "success" && siteUrl) {
+            status.environment_url = siteUrl;
+          }
+          await github.rest.repos.createDeploymentStatus(status);
+
+          core.setOutput("deployment_id", deploymentId);
+          await core.summary
+            .addHeading(environment)
+            .addTable([
+              [
+                { data: "Service", header: true },
+                { data: "Status", header: true },
+                { data: "URL", header: true },
+              ],
+              [service, stateLabel, apiState === "success" && siteUrl ? siteUrl : "—"],
+            ])
+            .write();

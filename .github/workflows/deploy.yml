@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
   packages: write
+  deployments: write
 
 jobs:
   deploy:
@@ -20,6 +21,14 @@ jobs:
       # Код репозитория на раннере
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Building
+        id: deployment
+        uses: ./.github/actions/deployment-status
+        with:
+          state: Building
+          service: socket
+          environment: Production
 
       # Версия из package.json engines: "node": "22.x". Кэш npm по package-lock.json
       - name: Setup Node.js
@@ -91,3 +100,22 @@ jobs:
             docker compose pull socket &&
             docker compose up -d socket &&
             docker image prune -f
+
+      - name: Ready
+        if: success()
+        uses: ./.github/actions/deployment-status
+        with:
+          state: Ready
+          service: socket
+          environment: Production
+          url: https://scribo-blog.duckdns.org
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+
+      - name: Error
+        if: failure()
+        uses: ./.github/actions/deployment-status
+        with:
+          state: Error
+          service: socket
+          environment: Production
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}

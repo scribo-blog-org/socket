@@ -8,6 +8,10 @@ on:
     branches:
       - master
 
+permissions:
+  contents: read
+  deployments: write
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -15,6 +19,14 @@ jobs:
       # Код репозитория на раннере
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Building
+        id: deployment
+        uses: ./.github/actions/deployment-status
+        with:
+          state: Building
+          service: socket
+          environment: Preview
 
       # Версия из package.json engines: "node": "22.x". Кэш npm по package-lock.json
       - name: Setup Node.js
@@ -38,3 +50,21 @@ jobs:
       # Сборка по локальному Dockerfile. В registry ничего не уходит
       - name: Docker build
         run: docker build -t "${{ github.repository }}:pr-${{ github.event.number }}" .
+
+      - name: Ready
+        if: success()
+        uses: ./.github/actions/deployment-status
+        with:
+          state: Ready
+          service: socket
+          environment: Preview
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+
+      - name: Error
+        if: failure()
+        uses: ./.github/actions/deployment-status
+        with:
+          state: Error
+          service: socket
+          environment: Preview
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
