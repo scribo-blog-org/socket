@@ -1,12 +1,12 @@
 name: PR step status
-description: Обновляет в pull request таблицу шагов Lint, Test и Build.
+description: Update the lint, test, and build table on the pull request.
 
 inputs:
   step:
-    description: init, lint, test или build
+    description: init, lint, test, or build
     required: true
   state:
-    description: waiting, running, success или failure. Для init не нужен.
+    description: waiting, running, success, or failure. Not used for init.
     required: false
     default: waiting
 
@@ -24,10 +24,10 @@ runs:
           const steps = ["lint", "test", "build"];
           const labels = { lint: "Lint", test: "Test", build: "Build" };
           const text = {
-            waiting: "⚪ Ожидание",
-            running: "🟡 В процессе",
-            success: "🟢 Успешно",
-            failure: "🔴 Ошибка",
+            waiting: "⚪ Waiting",
+            running: "🟡 In progress",
+            success: "🟢 Success",
+            failure: "🔴 Failed",
           };
           const marker = "<!-- scribo-deployment";
 
@@ -51,7 +51,7 @@ runs:
               `<!-- scribo-deployment ${encoded} -->`,
               "### Checks",
               "",
-              "| Шаг | Статус |",
+              "| Step | Status |",
               "| --- | --- |",
               rows,
               "",

@@ -1,28 +1,28 @@
 name: Deployment status
-description: Записывает статус Building, Ready или Error в Deployments этого репозитория.
+description: Record a Building, Ready, or Error deployment for this repository.
 
 inputs:
   state:
-    description: Building, Ready или Error
+    description: Building, Ready, or Error
     required: true
   service:
-    description: Имя сервиса в таблице
+    description: Service name shown in the summary
     required: true
   environment:
-    description: Production или Preview
+    description: Production or Preview
     required: true
   deployment_id:
-    description: Уже созданный deployment. Пусто, если статус первый.
+    description: Existing deployment id. Empty for the first status.
     required: false
     default: ""
   url:
-    description: Адрес сайта для статуса Ready
+    description: Site URL for the Ready status
     required: false
     default: ""
 
 outputs:
   deployment_id:
-    description: Id deployment в GitHub
+    description: GitHub deployment id
     value: ${{ steps.status.outputs.deployment_id }}
 
 runs:
