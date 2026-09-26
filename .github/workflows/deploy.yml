@@ -89,4 +89,5 @@ jobs:
           script: |
             cd /opt/scribo &&
             docker compose pull socket &&
-            docker compose up -d socket
+            docker compose up -d socket &&
+            docker image prune -f
