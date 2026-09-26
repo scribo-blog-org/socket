@@ -1,78 +1,76 @@
+# Выкладка socket-service при push в master.
+# Job один: падение lint, test или сборки останавливает пайплайн до push и SSH.
+
 name: Deploy
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
 
+# Встроенный GITHUB_TOKEN может публиковать образ в ghcr.io этого репозитория
 permissions:
   contents: read
   packages: write
-
-concurrency:
-  group: deploy-master
-  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Код репозитория на раннере
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      # Версия из package.json engines: "node": "22.x". Кэш npm по package-lock.json
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
 
-      - uses: docker/login-action@v3
+      # Зависимости строго по lock-файлу
+      - name: Install dependencies
+        run: npm ci
+
+      # Без успешного lint дальше job не идёт
+      - name: Lint
+        run: npm run lint
+
+      # Без успешного шага test образ не собирается и не выкатывается
+      - name: Test
+        run: npm run test
+
+      # Два тега одного образа: неизменяемый sha коммита и latest
+      - name: Docker build
+        run: |
+          docker build \
+            -t "ghcr.io/scribo-blog-org/socket:${{ github.sha }}" \
+            -t "ghcr.io/scribo-blog-org/socket:latest" \
+            .
+
+      # Вход в GHCR встроенным токеном Actions. Отдельный PAT не нужен
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/scribo-blog-org/socket:latest
-            ghcr.io/scribo-blog-org/socket:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-
-      - name: Make package public
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Публикация обоих тегов. Ошибка push останавливает job до SSH
+      - name: Push images
         run: |
-          gh api --method PATCH \
-            -H "Accept: application/vnd.github+json" \
-            /orgs/scribo-blog-org/packages/container/socket \
-            -f visibility=public
+          docker push "ghcr.io/scribo-blog-org/socket:${{ github.sha }}"
+          docker push "ghcr.io/scribo-blog-org/socket:latest"
 
-      - name: Check deploy key
-        id: ssh
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        run: |
-          if [ -n "$SSH_PRIVATE_KEY" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
+      # На сервере сервис compose называется socket. Обновляем SOCKET_TAG и перезапускаем только его
       - name: Deploy via SSH
-        if: steps.ssh.outputs.enabled == 'true'
         uses: appleboy/ssh-action@v1.2.0
-        env:
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
-          GHCR_USER: ${{ secrets.GHCR_USER }}
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: GHCR_PULL_TOKEN,GHCR_USER
           script: |
-            set -eu
-            cd /opt/scribo
-            if [ -n "${GHCR_PULL_TOKEN:-}" ]; then
-              printf '%s' "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-            fi
-            docker compose pull socket
-            docker compose up -d --no-deps socket
+            cd /opt/scribo &&
+            sed -i "s/^SOCKET_TAG=.*/SOCKET_TAG=${{ github.sha }}/" .env &&
+            docker compose pull socket &&
+            docker compose up -d socket
