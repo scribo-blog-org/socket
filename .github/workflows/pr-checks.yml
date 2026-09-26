@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   check:
+    name: Build
     runs-on: ubuntu-latest
     steps:
       # Код репозитория на раннере
