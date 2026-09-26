@@ -1,0 +1,25 @@
+{
+  "name": "scribo-socket",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "ioredis": "^5.8.1",
+    "jsonwebtoken": "^9.0.3",
+    "mongodb": "^6.20.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.7.3"
+  }
+}
