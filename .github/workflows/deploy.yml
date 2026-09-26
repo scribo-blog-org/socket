@@ -62,6 +62,23 @@ jobs:
           docker push "ghcr.io/scribo-blog-org/socket:${{ github.sha }}"
           docker push "ghcr.io/scribo-blog-org/socket:latest"
 
+      # Хост, пользователь и публичный ключ из секрета. Приватный ключ в лог не пишется.
+      - name: Show SSH identity
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          python3 -c 'import os; print("SSH_HOST:", " ".join(os.environ.get("SSH_HOST",""))); print("SSH_USER:", " ".join(os.environ.get("SSH_USER","")))'
+          keyfile=$(mktemp)
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$keyfile"
+          chmod 600 "$keyfile"
+          echo "public key from SSH_PRIVATE_KEY:"
+          ssh-keygen -y -f "$keyfile"
+          echo "fingerprint:"
+          ssh-keygen -l -f "$keyfile"
+          rm -f "$keyfile"
+
       # На сервере сервис compose называется socket. Обновляем SOCKET_TAG и перезапускаем только его
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
