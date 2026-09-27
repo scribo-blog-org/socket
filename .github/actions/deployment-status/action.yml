@@ -49,17 +49,17 @@ runs:
           const ref = context.payload.pull_request?.head?.sha || context.sha;
 
           if (!deploymentId) {
-            const created = await github.rest.repos.createDeployment({
-              owner,
-              repo,
-              ref,
-              environment,
-              auto_merge: false,
-              required_contexts: [],
-              description: stateLabel,
-              production_environment: environment === "Production",
-              transient_environment: environment !== "Production",
-            });
+          const created = await github.rest.repos.createDeployment({
+            owner,
+            repo,
+            ref,
+            environment,
+            auto_merge: false,
+            required_contexts: [],
+            description: stateLabel,
+            production_environment: environment === "Production",
+            transient_environment: environment === "Preview",
+          });
             if (!created.data.id) {
               core.setFailed("GitHub did not create a deployment");
               return;
@@ -74,12 +74,53 @@ runs:
             state: apiState,
             description: stateLabel,
             log_url: logUrl,
-            auto_inactive: apiState === "success",
+            auto_inactive: false,
           };
           if (apiState === "success" && siteUrl) {
             status.environment_url = siteUrl;
           }
           await github.rest.repos.createDeploymentStatus(status);
+
+          if (apiState === "success") {
+            const listed = await github.rest.repos.listDeployments({
+              owner,
+              repo,
+              per_page: 30,
+            });
+            for (const deployment of listed.data) {
+              if (String(deployment.id) === String(deploymentId)) continue;
+              let related = deployment.sha === ref;
+              if (!related) {
+                try {
+                  const compared = await github.rest.repos.compareCommitsWithBasehead({
+                    owner,
+                    repo,
+                    basehead: `${deployment.sha}...${ref}`,
+                  });
+                  related = compared.data.status === "ahead";
+                } catch {
+                  related = false;
+                }
+              }
+              if (!related) continue;
+              const { data: previous } = await github.rest.repos.listDeploymentStatuses({
+                owner,
+                repo,
+                deployment_id: deployment.id,
+                per_page: 1,
+              });
+              const latest = previous[0];
+              if (!latest || (latest.state !== "failure" && latest.state !== "error")) continue;
+              await github.rest.repos.createDeploymentStatus({
+                owner,
+                repo,
+                deployment_id: deployment.id,
+                state: "inactive",
+                description: "Replaced",
+                auto_inactive: false,
+              });
+            }
+          }
 
           core.setOutput("deployment_id", deploymentId);
           const urlCell = apiState === "success" && siteUrl ? siteUrl : "—";

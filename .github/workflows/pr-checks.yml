@@ -7,11 +7,16 @@ on:
   pull_request:
     branches:
       - master
+      - dev
 
 permissions:
   contents: read
   deployments: write
   pull-requests: write
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -101,6 +106,12 @@ jobs:
         with:
           step: build
           state: ${{ steps.build.outcome }}
+
+      - name: Mark failed checks
+        if: failure()
+        uses: ./.github/actions/pr-steps
+        with:
+          step: fail
 
       - name: Ready
         if: success()
