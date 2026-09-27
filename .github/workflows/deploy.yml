@@ -1,4 +1,5 @@
-# Выкладка socket-service при push в master.
+# Выкладка socket-service.
+# master → тег latest и compose прода. dev → тег staging и compose стейджа.
 # Job один: падение lint, test или сборки останавливает пайплайн до push и SSH.
 
 name: Deploy
@@ -7,6 +8,7 @@ on:
   push:
     branches:
       - master
+      - dev
 
 # Встроенный GITHUB_TOKEN может публиковать образ в ghcr.io этого репозитория
 permissions:
@@ -22,13 +24,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select target
+        id: target
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/master" ]; then
+            echo "image_tag=latest" >> "$GITHUB_OUTPUT"
+            echo "compose_file=docker-compose.yml" >> "$GITHUB_OUTPUT"
+            echo "compose_service=socket" >> "$GITHUB_OUTPUT"
+            echo "environment=Production" >> "$GITHUB_OUTPUT"
+            echo "url=https://scribo-blog.duckdns.org" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=staging" >> "$GITHUB_OUTPUT"
+            echo "compose_file=docker-compose.stage.yml" >> "$GITHUB_OUTPUT"
+            echo "compose_service=stage-socket" >> "$GITHUB_OUTPUT"
+            echo "environment=Staging" >> "$GITHUB_OUTPUT"
+            echo "url=https://scribo-blog-stage.duckdns.org" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Building
         id: deployment
         uses: ./.github/actions/deployment-status
         with:
           state: Building
           service: socket
-          environment: Production
+          environment: ${{ steps.target.outputs.environment }}
 
       # Версия из package.json engines: "node": "22.x". Кэш npm по package-lock.json
       - name: Setup Node.js
@@ -49,12 +68,12 @@ jobs:
       - name: Test
         run: npm run test
 
-      # Два тега одного образа: неизменяемый sha коммита и latest
+      # Два тега одного образа: неизменяемый sha коммита и latest либо staging
       - name: Docker build
         run: |
           docker build \
             -t "ghcr.io/scribo-blog-org/socket:${{ github.sha }}" \
-            -t "ghcr.io/scribo-blog-org/socket:latest" \
+            -t "ghcr.io/scribo-blog-org/socket:${{ steps.target.outputs.image_tag }}" \
             .
 
       # Вход в GHCR встроенным токеном Actions. Отдельный PAT не нужен
@@ -69,7 +88,7 @@ jobs:
       - name: Push images
         run: |
           docker push "ghcr.io/scribo-blog-org/socket:${{ github.sha }}"
-          docker push "ghcr.io/scribo-blog-org/socket:latest"
+          docker push "ghcr.io/scribo-blog-org/socket:${{ steps.target.outputs.image_tag }}"
 
       # Хост, пользователь и публичный ключ из секрета. Приватный ключ в лог не пишется.
       - name: Show SSH identity
@@ -88,17 +107,22 @@ jobs:
           ssh-keygen -l -f "$keyfile"
           rm -f "$keyfile"
 
-      # На сервере образ socket закреплён как :latest. Отдельного .env с тегом нет.
+      # master обновляет сервис socket в docker-compose.yml.
+      # dev обновляет stage-socket в docker-compose.stage.yml.
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          COMPOSE_FILE: ${{ steps.target.outputs.compose_file }}
+          COMPOSE_SERVICE: ${{ steps.target.outputs.compose_service }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: COMPOSE_FILE,COMPOSE_SERVICE
           script: |
             cd /opt/scribo &&
-            docker compose pull socket &&
-            docker compose up -d socket &&
+            docker compose -f "$COMPOSE_FILE" pull "$COMPOSE_SERVICE" &&
+            docker compose -f "$COMPOSE_FILE" up -d "$COMPOSE_SERVICE" &&
             docker image prune -f
 
       - name: Ready
@@ -107,8 +131,8 @@ jobs:
         with:
           state: Ready
           service: socket
-          environment: Production
-          url: https://scribo-blog.duckdns.org
+          environment: ${{ steps.target.outputs.environment }}
+          url: ${{ steps.target.outputs.url }}
           deployment_id: ${{ steps.deployment.outputs.deployment_id }}
 
       - name: Error
@@ -117,5 +141,5 @@ jobs:
         with:
           state: Error
           service: socket
-          environment: Production
+          environment: ${{ steps.target.outputs.environment }}
           deployment_id: ${{ steps.deployment.outputs.deployment_id }}
