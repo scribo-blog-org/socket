@@ -3,10 +3,10 @@ description: Update the lint, test, and build table on the pull request.
 
 inputs:
   step:
-    description: init, lint, test, or build
+    description: init, fail, lint, test, build, or deploy
     required: true
   state:
-    description: waiting, running, success, or failure. Not used for init.
+    description: waiting, running, success, or failure. Not used for init or fail.
     required: false
     default: waiting
 
@@ -18,37 +18,73 @@ runs:
         script: |
           const step = "${{ inputs.step }}";
           const nextState = "${{ inputs.state }}";
-          const pullRequest = context.payload.pull_request;
-          if (!pullRequest) return;
-
-          const steps = ["lint", "test", "build"];
-          const labels = { lint: "Lint", test: "Test", build: "Build" };
+          const names = ["lint", "test", "build", "deploy"];
+          const labels = { lint: "Lint", test: "Test", build: "Build", deploy: "Deploy" };
           const text = {
             waiting: "⚪ Waiting",
             running: "🟡 In progress",
             success: "🟢 Success",
             failure: "🔴 Failed",
           };
-          const marker = "<!-- scribo-deployment";
+          const marker = "<!-- scribo-checks";
+          const legacyMarker = "<!-- scribo-deployment";
 
           function readState(body) {
-            const state = { lint: "waiting", test: "waiting", build: "waiting" };
-            const match = body?.match(/<!-- scribo-deployment ([^>]*?)-->/);
+            const state = { sha: "", lint: "waiting", test: "waiting", build: "waiting" };
+            const match = body?.match(/<!-- scribo-checks ([^>]*?)-->/)
+              || body?.match(/<!-- scribo-deployment ([^>]*?)-->/);
             if (!match) return state;
             for (const part of match[1].trim().split(/\s+/)) {
-              const [key, value] = part.split("=");
-              if (state[key] && text[value]) state[key] = value;
+              const eq = part.indexOf("=");
+              if (eq === -1) continue;
+              const key = part.slice(0, eq);
+              const value = part.slice(eq + 1);
+              if (key === "sha" && /^[0-9a-f]{40}$/.test(value)) state.sha = value;
+              if (names.includes(key) && text[value]) state[key] = value;
             }
             return state;
           }
 
+          function apply(state, runSha) {
+            if (state.sha !== runSha) {
+              state.lint = "waiting";
+              state.test = "waiting";
+              state.build = "waiting";
+              delete state.deploy;
+              state.sha = runSha;
+            }
+            if (step === "init") {
+              state.lint = "waiting";
+              state.test = "waiting";
+              state.build = "waiting";
+              state.sha = runSha;
+              return true;
+            }
+            if (step === "fail") {
+              for (const name of ["lint", "test", "build"]) {
+                if (state[name] === "running") state[name] = "failure";
+              }
+              return true;
+            }
+            if (!names.includes(step) || !text[nextState]) {
+              core.setFailed(`Unknown step status: ${step}=${nextState}`);
+              return false;
+            }
+            state[step] = nextState;
+            state.sha = runSha;
+            return true;
+          }
+
           function render(state) {
-            const encoded = steps.map((name) => `${name}=${state[name]}`).join(" ");
-            const rows = steps
+            const shown = ["lint", "test", "build"].concat(state.deploy ? ["deploy"] : []);
+            const encoded = [`sha=${state.sha}`]
+              .concat(shown.map((name) => `${name}=${state[name]}`))
+              .join(" ");
+            const rows = shown
               .map((name) => `| ${labels[name]} | ${text[state[name]]} |`)
               .join("\n");
             return [
-              `<!-- scribo-deployment ${encoded} -->`,
+              `<!-- scribo-checks ${encoded} -->`,
               "### Checks",
               "",
               "| Step | Status |",
@@ -59,35 +95,65 @@ runs:
           }
 
           const { owner, repo } = context.repo;
-          const { data: comments } = await github.rest.issues.listComments({
-            owner,
-            repo,
-            issue_number: pullRequest.number,
-            per_page: 100,
-          });
-          const existing = comments.find((comment) => comment.body?.includes(marker));
-          const state = readState(existing?.body);
-          if (step !== "init") {
-            if (!steps.includes(step) || !text[nextState]) {
-              core.setFailed(`Unknown step status: ${step}=${nextState}`);
-              return;
-            }
-            state[step] = nextState;
-          }
-
-          const body = render(state);
-          if (existing) {
-            await github.rest.issues.updateComment({
+          let pullRequest = context.payload.pull_request;
+          if (!pullRequest) {
+            const branch = context.ref.replace(/^refs\/heads\//, "");
+            const { data: pulls } = await github.rest.pulls.list({
               owner,
               repo,
-              comment_id: existing.id,
-              body,
+              head: `${owner}:${branch}`,
+              state: "open",
+              per_page: 20,
             });
-            return;
+            pullRequest = pulls.find((pull) => pull.head.sha === context.sha) || null;
           }
-          await github.rest.issues.createComment({
+          if (!pullRequest) return;
+
+          const runSha = pullRequest.head?.sha || context.sha;
+          const live = await github.rest.pulls.get({
             owner,
             repo,
-            issue_number: pullRequest.number,
-            body,
+            pull_number: pullRequest.number,
           });
+          if (live.data.head.sha !== runSha) return;
+
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: pullRequest.number,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) =>
+              comment.body?.includes(marker) || comment.body?.includes(legacyMarker)
+            );
+            const state = readState(existing?.body);
+            if (!apply(state, runSha)) return;
+            const body = render(state);
+            if (!existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pullRequest.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            }
+            const { data: again } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: pullRequest.number,
+              per_page: 100,
+            });
+            const saved = again.find((comment) =>
+              comment.body?.includes(marker) || comment.body?.includes(legacyMarker)
+            );
+            if (saved?.body === body) return;
+          }
+          core.warning("The checks table was updated by another run at the same time.");

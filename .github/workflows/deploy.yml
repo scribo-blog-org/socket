@@ -16,6 +16,7 @@ permissions:
   contents: read
   packages: write
   deployments: write
+  pull-requests: write
 
 jobs:
   deploy:
@@ -128,6 +129,20 @@ jobs:
               docker compose -f "$COMPOSE_FILE" up -d "$COMPOSE_SERVICE"
             fi
             docker image prune -f
+
+      - name: Record deploy success
+        if: success()
+        uses: ./.github/actions/pr-steps
+        with:
+          step: deploy
+          state: success
+
+      - name: Record deploy failure
+        if: failure()
+        uses: ./.github/actions/pr-steps
+        with:
+          step: deploy
+          state: failure
 
       - name: Ready
         if: success()
