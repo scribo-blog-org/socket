@@ -1,5 +1,6 @@
 # Выкладка socket-service.
-# master → тег latest и compose прода. dev → тег staging и compose стейджа.
+# master → тег latest и сразу поднимает прод.
+# dev → тег staging. Контейнер стейджа пересоздаётся только если стейдж уже запущен.
 # Job один: падение lint, test или сборки останавливает пайплайн до push и SSH.
 
 name: Deploy
@@ -107,8 +108,8 @@ jobs:
           ssh-keygen -l -f "$keyfile"
           rm -f "$keyfile"
 
-      # master обновляет сервис socket в docker-compose.yml.
-      # dev обновляет stage-socket в docker-compose.stage.yml.
+      # master всегда поднимает socket.
+      # dev скачивает stage-socket и пересоздаёт его, только если стейдж уже запущен.
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
@@ -120,9 +121,12 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: COMPOSE_FILE,COMPOSE_SERVICE
           script: |
-            cd /opt/scribo &&
-            docker compose -f "$COMPOSE_FILE" pull "$COMPOSE_SERVICE" &&
-            docker compose -f "$COMPOSE_FILE" up -d "$COMPOSE_SERVICE" &&
+            set -eu
+            cd /opt/scribo
+            docker compose -f "$COMPOSE_FILE" pull "$COMPOSE_SERVICE"
+            if [ "$COMPOSE_FILE" = "docker-compose.yml" ] || [ -n "$(docker compose -f "$COMPOSE_FILE" ps --status running -q)" ]; then
+              docker compose -f "$COMPOSE_FILE" up -d "$COMPOSE_SERVICE"
+            fi
             docker image prune -f
 
       - name: Ready
