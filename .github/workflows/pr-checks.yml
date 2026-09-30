@@ -21,7 +21,9 @@ concurrency:
 jobs:
   check:
     name: Build
-    runs-on: ubuntu-latest
+    # Тот же aarch64, что и на машине: иначе PR собирал бы не тот образ,
+    # который поедет в прод.
+    runs-on: ubuntu-24.04-arm
     steps:
       # Код репозитория на раннере
       - name: Checkout

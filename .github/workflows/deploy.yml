@@ -20,7 +20,9 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Машина на Oracle Cloud Free Tier — это Ampere, то есть aarch64.
+    # Сборка на x86-раннере дала бы образ, который там не запускается.
+    runs-on: ubuntu-24.04-arm
     steps:
       # Код репозитория на раннере
       - name: Checkout
@@ -31,14 +33,12 @@ jobs:
         run: |
           if [ "${{ github.ref }}" = "refs/heads/master" ]; then
             echo "image_tag=latest" >> "$GITHUB_OUTPUT"
-            echo "compose_file=docker-compose.yml" >> "$GITHUB_OUTPUT"
-            echo "compose_service=socket" >> "$GITHUB_OUTPUT"
+            echo "stack=prod" >> "$GITHUB_OUTPUT"
             echo "environment=Production" >> "$GITHUB_OUTPUT"
             echo "url=https://scribo-blog.duckdns.org" >> "$GITHUB_OUTPUT"
           else
             echo "image_tag=staging" >> "$GITHUB_OUTPUT"
-            echo "compose_file=docker-compose.stage.yml" >> "$GITHUB_OUTPUT"
-            echo "compose_service=stage-socket" >> "$GITHUB_OUTPUT"
+            echo "stack=stage" >> "$GITHUB_OUTPUT"
             echo "environment=Staging" >> "$GITHUB_OUTPUT"
             echo "url=https://scribo-blog-stage.duckdns.org" >> "$GITHUB_OUTPUT"
           fi
@@ -92,25 +92,23 @@ jobs:
           docker push "ghcr.io/scribo-blog-org/socket:${{ github.sha }}"
           docker push "ghcr.io/scribo-blog-org/socket:${{ steps.target.outputs.image_tag }}"
 
-      # master всегда поднимает socket.
-      # dev скачивает stage-socket и пересоздаёт его, только если стейдж уже запущен.
+      # Стеки описаны одним compose-файлом, поэтому окружение выбирается целью,
+      # а имя сервиса в обоих одинаковое. Без prune диск забивается слоями
+      # node_modules от предыдущего тега.
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
-          COMPOSE_FILE: ${{ steps.target.outputs.compose_file }}
-          COMPOSE_SERVICE: ${{ steps.target.outputs.compose_service }}
+          STACK: ${{ steps.target.outputs.stack }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: COMPOSE_FILE,COMPOSE_SERVICE
+          envs: STACK
           script: |
             set -eu
-            cd /opt/scribo
-            docker compose -f "$COMPOSE_FILE" pull "$COMPOSE_SERVICE"
-            if [ "$COMPOSE_FILE" = "docker-compose.yml" ] || [ -n "$(docker compose -f "$COMPOSE_FILE" ps --status running -q)" ]; then
-              docker compose -f "$COMPOSE_FILE" up -d "$COMPOSE_SERVICE"
-            fi
+            cd /srv/scribo/infra
+            ./scribo pull "$STACK" socket
+            ./scribo up "$STACK" socket
             docker image prune -f
 
       - name: Record deploy success
