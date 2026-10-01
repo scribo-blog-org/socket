@@ -1,12 +1,12 @@
 name: PR step status
-description: Update the lint, test, and build table on the pull request.
+description: Update the checks table in the pull request comment.
 
 inputs:
   step:
-    description: init, fail, lint, test, build, or deploy
+    description: init, install, lint, test, or build
     required: true
   state:
-    description: waiting, running, success, or failure. Not used for init or fail.
+    description: waiting, running, success, failure, skipped, or cancelled. Not used for init.
     required: false
     default: waiting
 
@@ -14,25 +14,34 @@ runs:
   using: composite
   steps:
     - uses: actions/github-script@v7
+      env:
+        STEP: ${{ inputs.step }}
+        NEXT_STATE: ${{ inputs.state }}
       with:
         script: |
-          const step = "${{ inputs.step }}";
-          const nextState = "${{ inputs.state }}";
-          const names = ["lint", "test", "build", "deploy"];
-          const labels = { lint: "Lint", test: "Test", build: "Build", deploy: "Deploy" };
+          const step = process.env.STEP;
+          const nextState = process.env.NEXT_STATE;
+          const names = ["install", "lint", "test", "build"];
+          const labels = { install: "Install", lint: "Lint", test: "Test", build: "Build" };
           const text = {
             waiting: "⚪ Waiting",
             running: "🟡 In progress",
             success: "🟢 Success",
             failure: "🔴 Failed",
+            skipped: "⏭️ Skipped",
+            cancelled: "🚫 Cancelled",
           };
-          const marker = "<!-- scribo-checks";
-          const legacyMarker = "<!-- scribo-deployment";
+          const markers = ["<!-- scribo-checks", "<!-- scribo-deployment"];
 
+          function emptyState() {
+            return { sha: "", install: "waiting", lint: "waiting", test: "waiting", build: "waiting" };
+          }
+
+          // Unknown keys (the old deploy row) are ignored, so an old comment is
+          // rewritten in the new format on the next update.
           function readState(body) {
-            const state = { sha: "", lint: "waiting", test: "waiting", build: "waiting" };
-            const match = body?.match(/<!-- scribo-checks ([^>]*?)-->/)
-              || body?.match(/<!-- scribo-deployment ([^>]*?)-->/);
+            const state = emptyState();
+            const match = body?.match(/<!-- scribo-(?:checks|deployment) ([^>]*?)-->/);
             if (!match) return state;
             for (const part of match[1].trim().split(/\s+/)) {
               const eq = part.indexOf("=");
@@ -46,41 +55,23 @@ runs:
           }
 
           function apply(state, runSha) {
-            if (state.sha !== runSha) {
-              state.lint = "waiting";
-              state.test = "waiting";
-              state.build = "waiting";
-              delete state.deploy;
-              state.sha = runSha;
+            if (state.sha !== runSha || step === "init") {
+              Object.assign(state, emptyState(), { sha: runSha });
             }
-            if (step === "init") {
-              state.lint = "waiting";
-              state.test = "waiting";
-              state.build = "waiting";
-              state.sha = runSha;
-              return true;
-            }
-            if (step === "fail") {
-              for (const name of ["lint", "test", "build"]) {
-                if (state[name] === "running") state[name] = "failure";
-              }
-              return true;
-            }
+            if (step === "init") return true;
             if (!names.includes(step) || !text[nextState]) {
               core.setFailed(`Unknown step status: ${step}=${nextState}`);
               return false;
             }
             state[step] = nextState;
-            state.sha = runSha;
             return true;
           }
 
-          function render(state) {
-            const shown = ["lint", "test", "build"].concat(state.deploy ? ["deploy"] : []);
+          function render(state, runUrl) {
             const encoded = [`sha=${state.sha}`]
-              .concat(shown.map((name) => `${name}=${state[name]}`))
+              .concat(names.map((name) => `${name}=${state[name]}`))
               .join(" ");
-            const rows = shown
+            const rows = names
               .map((name) => `| ${labels[name]} | ${text[state[name]]} |`)
               .join("\n");
             return [
@@ -91,25 +82,21 @@ runs:
               "| --- | --- |",
               rows,
               "",
+              `Commit \`${state.sha.slice(0, 7)}\` · [Workflow run](${runUrl})`,
+              "",
             ].join("\n");
           }
 
           const { owner, repo } = context.repo;
-          let pullRequest = context.payload.pull_request;
+          const pullRequest = context.payload.pull_request;
           if (!pullRequest) {
-            const branch = context.ref.replace(/^refs\/heads\//, "");
-            const { data: pulls } = await github.rest.pulls.list({
-              owner,
-              repo,
-              head: `${owner}:${branch}`,
-              state: "open",
-              per_page: 20,
-            });
-            pullRequest = pulls.find((pull) => pull.head.sha === context.sha) || null;
+            core.info("Not a pull request run, the checks table is not updated.");
+            return;
           }
-          if (!pullRequest) return;
 
-          const runSha = pullRequest.head?.sha || context.sha;
+          // A newer push makes this run stale. It must not overwrite the table
+          // that the newer run is filling in.
+          const runSha = pullRequest.head.sha;
           const live = await github.rest.pulls.get({
             owner,
             repo,
@@ -117,27 +104,51 @@ runs:
           });
           if (live.data.head.sha !== runSha) return;
 
-          for (let attempt = 0; attempt < 5; attempt++) {
-            const { data: comments } = await github.rest.issues.listComments({
+          // Only comments written by the workflow count, so a pasted marker
+          // from a person is never picked up. Pagination covers long threads.
+          async function findTables() {
+            const comments = await github.paginate(github.rest.issues.listComments, {
               owner,
               repo,
               issue_number: pullRequest.number,
               per_page: 100,
             });
-            const existing = comments.find((comment) =>
-              comment.body?.includes(marker) || comment.body?.includes(legacyMarker)
+            return comments.filter(
+              (comment) =>
+                comment.user?.login === "github-actions[bot]" &&
+                markers.some((marker) => comment.body?.includes(marker)),
             );
-            const state = readState(existing?.body);
-            if (!apply(state, runSha)) return;
-            const body = render(state);
-            if (!existing) {
-              await github.rest.issues.createComment({
-                owner,
-                repo,
-                issue_number: pullRequest.number,
-                body,
-              });
-            } else {
+          }
+
+          // Two runs can both see no table and both create one. The oldest
+          // comment is kept, so every run converges on the same one.
+          async function dropDuplicates(tables) {
+            for (const extra of tables.slice(1)) {
+              try {
+                await github.rest.issues.deleteComment({ owner, repo, comment_id: extra.id });
+              } catch (error) {
+                core.warning(`Could not delete duplicate table ${extra.id}: ${error.message}`);
+              }
+            }
+          }
+
+          const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+          const tables = await findTables();
+          const existing = tables[0];
+          const state = readState(existing?.body);
+          if (!apply(state, runSha)) return;
+          const body = render(state, runUrl);
+
+          if (!existing) {
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pullRequest.number,
+              body,
+            });
+            await dropDuplicates(await findTables());
+          } else {
+            if (existing.body !== body) {
               await github.rest.issues.updateComment({
                 owner,
                 repo,
@@ -145,15 +156,5 @@ runs:
                 body,
               });
             }
-            const { data: again } = await github.rest.issues.listComments({
-              owner,
-              repo,
-              issue_number: pullRequest.number,
-              per_page: 100,
-            });
-            const saved = again.find((comment) =>
-              comment.body?.includes(marker) || comment.body?.includes(legacyMarker)
-            );
-            if (saved?.body === body) return;
+            await dropDuplicates(tables);
           }
-          core.warning("The checks table was updated by another run at the same time.");
