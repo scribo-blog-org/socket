@@ -1,6 +1,6 @@
 # Выкладка socket-service.
 # master → тег latest и сразу поднимает прод.
-# dev → тег staging. Контейнер стейджа пересоздаётся только если стейдж уже запущен.
+# dev → тег staging и поднимает стейдж.
 # Job один: падение lint, test или сборки останавливает пайплайн до push и SSH.
 
 name: Deploy
@@ -11,18 +11,23 @@ on:
       - master
       - dev
 
-# Встроенный GITHUB_TOKEN может публиковать образ в ghcr.io этого репозитория
 permissions:
   contents: read
   packages: write
   deployments: write
-  pull-requests: write
+
+# Два деплоя одного сервиса подряд не должны идти параллельно: второй ждёт
+# первого и ничего не отменяет посреди выкладки.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   deploy:
     # Машина на Oracle Cloud Free Tier — это Ampere, то есть aarch64.
     # Сборка на x86-раннере дала бы образ, который там не запускается.
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
       # Код репозитория на раннере
       - name: Checkout
@@ -35,12 +40,12 @@ jobs:
             echo "image_tag=latest" >> "$GITHUB_OUTPUT"
             echo "stack=prod" >> "$GITHUB_OUTPUT"
             echo "environment=Production" >> "$GITHUB_OUTPUT"
-            echo "url=https://scribo-blog.duckdns.org" >> "$GITHUB_OUTPUT"
+            echo "url=https://scribo.pp.ua" >> "$GITHUB_OUTPUT"
           else
             echo "image_tag=staging" >> "$GITHUB_OUTPUT"
             echo "stack=stage" >> "$GITHUB_OUTPUT"
             echo "environment=Staging" >> "$GITHUB_OUTPUT"
-            echo "url=https://scribo-blog-stage.duckdns.org" >> "$GITHUB_OUTPUT"
+            echo "url=https://scribo-stage.pp.ua" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Building
@@ -94,36 +99,36 @@ jobs:
 
       # Стеки описаны одним compose-файлом, поэтому окружение выбирается целью,
       # а имя сервиса в обоих одинаковое. Без prune диск забивается слоями
-      # node_modules от предыдущего тега.
+      # node_modules от предыдущего тега. После запуска job ждёт, пока
+      # контейнер станет healthy, иначе выкладка считалась бы успешной даже
+      # при контейнере, который падает на старте.
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
           STACK: ${{ steps.target.outputs.stack }}
+          SERVICE: socket
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: STACK
+          envs: STACK,SERVICE
           script: |
             set -eu
             cd /srv/scribo/infra
-            ./scribo pull "$STACK" socket
-            ./scribo up "$STACK" socket
+            ./scribo pull "$STACK" "$SERVICE"
+            ./scribo up "$STACK" "$SERVICE"
             docker image prune -f
-
-      - name: Record deploy success
-        if: success()
-        uses: ./.github/actions/pr-steps
-        with:
-          step: deploy
-          state: success
-
-      - name: Record deploy failure
-        if: failure()
-        uses: ./.github/actions/pr-steps
-        with:
-          step: deploy
-          state: failure
+            for attempt in $(seq 1 36); do
+              health=$(docker inspect -f '{{.State.Health.Status}}' "$STACK-$SERVICE" 2>/dev/null || echo missing)
+              if [ "$health" = healthy ]; then
+                echo "$STACK-$SERVICE is healthy"
+                exit 0
+              fi
+              sleep 5
+            done
+            echo "$STACK-$SERVICE did not become healthy: $health" >&2
+            docker logs --tail 50 "$STACK-$SERVICE" >&2 || true
+            exit 1
 
       - name: Ready
         if: success()
@@ -140,6 +145,15 @@ jobs:
         uses: ./.github/actions/deployment-status
         with:
           state: Error
+          service: socket
+          environment: ${{ steps.target.outputs.environment }}
+          deployment_id: ${{ steps.deployment.outputs.deployment_id }}
+
+      - name: Cancelled
+        if: cancelled()
+        uses: ./.github/actions/deployment-status
+        with:
+          state: Cancelled
           service: socket
           environment: ${{ steps.target.outputs.environment }}
           deployment_id: ${{ steps.deployment.outputs.deployment_id }}
