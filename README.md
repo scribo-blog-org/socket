@@ -57,6 +57,7 @@ npm start
 | `PORT` | Порт, по умолчанию `3002` |
 | `REDIS_URL` | С хоста `redis://127.0.0.1:6379`. В compose `redis://redis:6379` |
 | `JWT_PUBLIC_KEY` | Публичный ключ RS256, PEM |
+| `MONGODB_URI` | Необязательно. Полная строка, например локальная Mongo из `infra/local/compose.yml`; тогда `DB_USER`, `DB_PASSWORD`, `DB_HOST` не нужны, `DB_NAME` остаётся обязательным |
 | `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_NAME` | Доступ к Mongo. `DB_HOST` — хост кластера, без схемы и без учётных данных |
 
 ## Как устроен код
