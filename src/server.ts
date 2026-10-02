@@ -379,7 +379,7 @@ export async function start(options: {
     await new Promise<void>((resolve) => {
         server.listen(config.port, '0.0.0.0', () => {
             console.log(
-                `socket ready port=${config.port} redis connected mongo connected host=${config.dbHost} db=${config.dbName}`,
+                `socket ready port=${config.port} redis connected mongo connected host=${config.dbHost || 'local-uri'} db=${config.dbName}`,
             );
             resolve();
         });
