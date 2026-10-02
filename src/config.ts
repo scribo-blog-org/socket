@@ -2,6 +2,7 @@ export type SocketConfig = {
     port: number;
     redisUrl: string;
     publicKey: string;
+    mongoUri: string;
     dbUser: string;
     dbPassword: string;
     dbHost: string;
@@ -28,13 +29,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): SocketConfig {
         throw new Error('Set PORT');
     }
 
+    const mongoUri = env.MONGODB_URI?.trim() ?? '';
     return {
         port,
         redisUrl: required(env, 'REDIS_URL'),
         publicKey: required(env, 'JWT_PUBLIC_KEY'),
-        dbUser: required(env, 'DB_USER'),
-        dbPassword: required(env, 'DB_PASSWORD'),
-        dbHost: required(env, 'DB_HOST'),
+        mongoUri,
+        dbUser: mongoUri ? '' : required(env, 'DB_USER'),
+        dbPassword: mongoUri ? '' : required(env, 'DB_PASSWORD'),
+        dbHost: mongoUri ? '' : required(env, 'DB_HOST'),
         dbName: required(env, 'DB_NAME'),
     };
 }

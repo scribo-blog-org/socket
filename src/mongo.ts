@@ -8,8 +8,9 @@ function dbHost(value: string): string {
 
 export function mongoUri(config: Pick<
     SocketConfig,
-    'dbUser' | 'dbPassword' | 'dbHost' | 'dbName'
+    'mongoUri' | 'dbUser' | 'dbPassword' | 'dbHost' | 'dbName'
 >): string {
+    if (config.mongoUri) return config.mongoUri;
     const host = dbHost(config.dbHost);
     if (!host) {
         throw new Error('Set DB_HOST');
