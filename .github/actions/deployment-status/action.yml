@@ -93,10 +93,6 @@ runs:
           }
           await github.rest.repos.createDeploymentStatus(status);
 
-          // A finished deployment replaces the earlier ones of the same
-          // environment that lead up to this commit. Deployments of other
-          // branches are not ancestors of it, so they are left alone, and
-          // deployments that are still running are never touched.
           if (apiState === "success") {
             const listed = await github.rest.repos.listDeployments({
               owner,

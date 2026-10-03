@@ -37,8 +37,6 @@ runs:
             return { sha: "", install: "waiting", lint: "waiting", test: "waiting", build: "waiting" };
           }
 
-          // Unknown keys (the old deploy row) are ignored, so an old comment is
-          // rewritten in the new format on the next update.
           function readState(body) {
             const state = emptyState();
             const match = body?.match(/<!-- scribo-(?:checks|deployment) ([^>]*?)-->/);
@@ -94,8 +92,6 @@ runs:
             return;
           }
 
-          // A newer push makes this run stale. It must not overwrite the table
-          // that the newer run is filling in.
           const runSha = pullRequest.head.sha;
           const live = await github.rest.pulls.get({
             owner,
@@ -104,8 +100,6 @@ runs:
           });
           if (live.data.head.sha !== runSha) return;
 
-          // Only comments written by the workflow count, so a pasted marker
-          // from a person is never picked up. Pagination covers long threads.
           async function findTables() {
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner,
@@ -120,8 +114,6 @@ runs:
             );
           }
 
-          // Two runs can both see no table and both create one. The oldest
-          // comment is kept, so every run converges on the same one.
           async function dropDuplicates(tables) {
             for (const extra of tables.slice(1)) {
               try {
