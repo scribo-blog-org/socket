@@ -54,6 +54,24 @@ export class Conversations {
         );
     }
 
+    async otherParticipants(
+        conversationId: string,
+        userId: string,
+    ): Promise<string[] | null> {
+        if (!/^[a-fA-F0-9]{24}$/.test(conversationId)) return null;
+        const doc = await this.client
+            .db(this.dbName)
+            .collection('conversations')
+            .findOne(
+                { _id: new ObjectId(conversationId) },
+                { projection: { participants: 1 } },
+            );
+        if (!Array.isArray(doc?.participants)) return null;
+        const ids = doc.participants.map((participant) => String(participant));
+        if (!ids.includes(userId)) return null;
+        return ids.filter((id) => id !== userId);
+    }
+
     async close() {
         await this.client.close();
     }
