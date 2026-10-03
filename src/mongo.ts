@@ -72,6 +72,29 @@ export class Conversations {
         return ids.filter((id) => id !== userId);
     }
 
+    async touchLastActivity(
+        userId: string,
+        at = new Date(),
+    ): Promise<{ at: Date; isPublic: boolean } | null> {
+        if (!/^[a-fA-F0-9]{24}$/.test(userId)) return null;
+        const updated = await this.client
+            .db(this.dbName)
+            .collection('users')
+            .findOneAndUpdate(
+                { _id: new ObjectId(userId) },
+                { $set: { last_activity_at: at } },
+                {
+                    returnDocument: 'after',
+                    projection: { is_last_activity_public: 1 },
+                },
+            );
+        if (!updated) return null;
+        return {
+            at,
+            isPublic: updated.is_last_activity_public !== false,
+        };
+    }
+
     async close() {
         await this.client.close();
     }
