@@ -1,5 +1,3 @@
-# Посторонний может открыть issue, но не закрыть её.
-# Если закрыл не участник с правом записи, issue сразу открывается снова.
 
 name: Reopen issues closed by non-collaborators
 

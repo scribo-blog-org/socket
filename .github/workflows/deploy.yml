@@ -1,7 +1,3 @@
-# Выкладка socket-service.
-# master → тег latest и сразу поднимает прод.
-# dev → тег staging и поднимает стейдж.
-# Job один: падение lint, test или сборки останавливает пайплайн до push и SSH.
 
 name: Deploy
 
@@ -16,20 +12,15 @@ permissions:
   packages: write
   deployments: write
 
-# Два деплоя одного сервиса подряд не должны идти параллельно: второй ждёт
-# первого и ничего не отменяет посреди выкладки.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   deploy:
-    # Машина на Oracle Cloud Free Tier — это Ampere, то есть aarch64.
-    # Сборка на x86-раннере дала бы образ, который там не запускается.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      # Код репозитория на раннере
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -56,26 +47,21 @@ jobs:
           service: socket
           environment: ${{ steps.target.outputs.environment }}
 
-      # Версия из package.json engines: "node": "22.x". Кэш npm по package-lock.json
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22.x"
           cache: npm
 
-      # Зависимости строго по lock-файлу
       - name: Install dependencies
         run: npm ci
 
-      # Без успешного lint дальше job не идёт
       - name: Lint
         run: npm run lint
 
-      # Без успешного шага test образ не собирается и не выкатывается
       - name: Test
         run: npm run test
 
-      # Два тега одного образа: неизменяемый sha коммита и latest либо staging
       - name: Docker build
         run: |
           docker build \
@@ -83,7 +69,6 @@ jobs:
             -t "ghcr.io/scribo-blog-org/socket:${{ steps.target.outputs.image_tag }}" \
             .
 
-      # Вход в GHCR встроенным токеном Actions. Отдельный PAT не нужен
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -91,17 +76,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Публикация обоих тегов. Ошибка push останавливает job до SSH
       - name: Push images
         run: |
           docker push "ghcr.io/scribo-blog-org/socket:${{ github.sha }}"
           docker push "ghcr.io/scribo-blog-org/socket:${{ steps.target.outputs.image_tag }}"
 
-      # Стеки описаны одним compose-файлом, поэтому окружение выбирается целью,
-      # а имя сервиса в обоих одинаковое. Без prune диск забивается слоями
-      # node_modules от предыдущего тега. После запуска job ждёт, пока
-      # контейнер станет healthy, иначе выкладка считалась бы успешной даже
-      # при контейнере, который падает на старте.
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
         env:
