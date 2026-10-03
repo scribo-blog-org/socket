@@ -6,9 +6,11 @@ import { AccessVerifier } from './access';
 import type { SocketConfig } from './config';
 import { Conversations } from './mongo';
 import { PRESENCE_CHANNEL, PresenceStore } from './presence';
+import { TypingStore } from './typing';
 
 const EVENTS_CHANNEL = 'scribo:events';
 const PRESENCE_REFRESH_MS = 15000;
+const ACTIVITY_REFRESH_MS = 60_000;
 
 type ClientState = {
     userId: string | null;
@@ -19,7 +21,14 @@ type Control =
     | { type: 'auth'; access?: unknown }
     | { type: 'subscribe'; room?: unknown }
     | { type: 'unsubscribe'; room?: unknown }
-    | { type: 'presence:query'; id?: unknown; users?: unknown };
+    | { type: 'presence:query'; id?: unknown; users?: unknown }
+    | {
+          type: 'typing';
+          conversation?: unknown;
+          typing?: unknown;
+          at?: unknown;
+      }
+    | { type: 'typing:query'; id?: unknown };
 
 export type SocketServer = {
     close: () => Promise<void>;
@@ -88,6 +97,11 @@ export async function start(options: {
         maxRetriesPerRequest: null,
     });
     const presence = new PresenceStore(redis);
+    const typing = new TypingStore(redis);
+    const peerCache = new Map<
+        string,
+        { at: number; ids: string[] | null }
+    >();
     const authed = new Set<WebSocket>();
     redis.on('error', (error: Error) => {
         console.error(`redis ${error.message}`);
@@ -127,7 +141,7 @@ export async function start(options: {
 
     subscriber.on('message', (channel, message) => {
         if (channel === PRESENCE_CHANNEL) {
-            let parsed: { userId?: unknown; online?: unknown };
+            let parsed: { userId?: unknown; online?: unknown; at?: unknown };
             try {
                 parsed = JSON.parse(message) as typeof parsed;
             } catch {
@@ -140,6 +154,7 @@ export async function start(options: {
                 type: 'presence',
                 user: parsed.userId,
                 online: parsed.online,
+                ...(typeof parsed.at === 'string' ? { at: parsed.at } : {}),
             };
             for (const socket of authed) {
                 send(socket, body);
@@ -168,12 +183,70 @@ export async function start(options: {
         }
     });
 
+    const peerIds = async (conversationId: string, userId: string) => {
+        const key = `${conversationId}:${userId}`;
+        const cached = peerCache.get(key);
+        if (cached && Date.now() - cached.at < 30000) return cached.ids;
+        const ids = await conversations.otherParticipants(
+            conversationId,
+            userId,
+        );
+        peerCache.set(key, { at: Date.now(), ids });
+        return ids;
+    };
+
+    const publishTyping = async (
+        peerIdsToNotify: string[],
+        payload: {
+            conversation_id: string;
+            user_id: string;
+            typing: boolean;
+        },
+    ) => {
+        if (!peerIdsToNotify.length) return;
+        const pipe = redis.pipeline();
+        for (const peerId of peerIdsToNotify) {
+            pipe.publish(
+                EVENTS_CHANNEL,
+                JSON.stringify({
+                    room: `user:${peerId}`,
+                    event: 'chat:typing',
+                    payload,
+                }),
+            );
+        }
+        await pipe.exec();
+    };
+
+    const pushTypingSnapshot = async (socket: WebSocket, userId: string) => {
+        const items = await typing.listFor(userId);
+        for (const item of items) {
+            send(socket, {
+                room: `user:${userId}`,
+                event: 'chat:typing',
+                payload: {
+                    conversation_id: item.conversationId,
+                    user_id: item.userId,
+                    typing: true,
+                },
+            });
+        }
+    };
+
+    const stamp = (value: unknown) => {
+        const now = Date.now();
+        if (typeof value !== 'number' || !Number.isFinite(value)) return now;
+        if (value <= 0 || value > now + 1000) return now;
+        return value;
+    };
+
     wss.on('connection', (socket) => {
         const state: ClientState = { userId: null, rooms: new Set() };
         const connectionId = randomUUID();
         let closed = false;
         let presenceJoined = false;
         let presenceTimer: ReturnType<typeof setInterval> | null = null;
+        let activityTimer: ReturnType<typeof setInterval> | null = null;
         let chain = Promise.resolve();
         const authTimer = setTimeout(() => {
             if (!state.userId) socket.close(4001, 'unauthorized');
@@ -194,17 +267,40 @@ export async function start(options: {
             if (becameOnline) await presence.publish(userId, true);
         };
 
+        const stopActivityTimer = () => {
+            if (!activityTimer) return;
+            clearInterval(activityTimer);
+            activityTimer = null;
+        };
+
+        const rememberActivity = (userId: string) =>
+            conversations.touchLastActivity(userId);
+
         const markOffline = async () => {
             if (presenceTimer) {
                 clearInterval(presenceTimer);
                 presenceTimer = null;
             }
+            stopActivityTimer();
             authed.delete(socket);
             const userId = state.userId;
-            if (!userId || !presenceJoined) return;
+            if (!userId) return;
+            let activity: { at: Date; isPublic: boolean } | null = null;
+            try {
+                activity = await rememberActivity(userId);
+            } catch (error) {
+                console.error(error instanceof Error ? error.message : error);
+            }
+            if (!presenceJoined) return;
             presenceJoined = false;
             const becameOffline = await presence.leave(userId, connectionId);
-            if (becameOffline) await presence.publish(userId, false);
+            if (becameOffline) {
+                await presence.publish(
+                    userId,
+                    false,
+                    activity?.isPublic ? activity.at : undefined,
+                );
+            }
         };
 
         const handle = async (raw: string) => {
@@ -250,6 +346,20 @@ export async function start(options: {
                         });
                     }, PRESENCE_REFRESH_MS);
                 }
+                if (!activityTimer) {
+                    activityTimer = setInterval(() => {
+                        if (!state.userId || closed) return;
+                        void rememberActivity(state.userId).catch(
+                            (error: unknown) => {
+                                console.error(
+                                    error instanceof Error
+                                        ? error.message
+                                        : error,
+                                );
+                            },
+                        );
+                    }, ACTIVITY_REFRESH_MS);
+                }
                 send(socket, { type: 'auth', ok: true });
                 return;
             }
@@ -276,7 +386,8 @@ export async function start(options: {
                 return;
             }
 
-            if (!state.userId) {
+            const userId = state.userId;
+            if (!userId) {
                 send(socket, { type: 'error', error: 'unauthorized' });
                 return;
             }
@@ -306,12 +417,19 @@ export async function start(options: {
                     }
                     join(`user:${room.id}`, socket, state);
                     send(socket, { type: 'subscribe', ok: true, room: message.room });
+                    try {
+                        await pushTypingSnapshot(socket, room.id);
+                    } catch (error) {
+                        console.error(
+                            error instanceof Error ? error.message : error,
+                        );
+                    }
                     return;
                 }
                 try {
                     const allowed = await conversations.hasParticipant(
                         room.id,
-                        state.userId,
+                        userId,
                     );
                     if (!allowed) {
                         send(socket, {
@@ -334,6 +452,75 @@ export async function start(options: {
                 }
                 join(`chat:${room.id}`, socket, state);
                 send(socket, { type: 'subscribe', ok: true, room: message.room });
+                return;
+            }
+
+            if (message.type === 'typing:query') {
+                try {
+                    const items = await typing.listFor(userId);
+                    send(socket, {
+                        type: 'typing',
+                        id: typeof message.id === 'string' ? message.id : undefined,
+                        items: items.map((item) => ({
+                            conversation_id: item.conversationId,
+                            user_id: item.userId,
+                        })),
+                    });
+                } catch (error) {
+                    console.error(
+                        error instanceof Error ? error.message : error,
+                    );
+                    send(socket, { type: 'error', error: 'unavailable' });
+                }
+                return;
+            }
+
+            if (message.type === 'typing') {
+                if (typeof message.conversation !== 'string') {
+                    send(socket, { type: 'error', error: 'bad_request' });
+                    return;
+                }
+                const conversationId = message.conversation;
+                if (!/^[a-fA-F0-9]{24}$/.test(conversationId)) {
+                    send(socket, { type: 'error', error: 'bad_request' });
+                    return;
+                }
+                const at = stamp(message.at);
+                try {
+                    if (message.typing === false) {
+                        const peers = await typing.stop(
+                            conversationId,
+                            userId,
+                            at,
+                        );
+                        await publishTyping(peers, {
+                            conversation_id: conversationId,
+                            user_id: userId,
+                            typing: false,
+                        });
+                        return;
+                    }
+                    const peers = await peerIds(conversationId, userId);
+                    if (!peers?.length) return;
+                    const accepted = await typing.pulse(
+                        conversationId,
+                        userId,
+                        connectionId,
+                        peers,
+                        at,
+                    );
+                    if (!accepted) return;
+                    await publishTyping(peers, {
+                        conversation_id: conversationId,
+                        user_id: userId,
+                        typing: true,
+                    });
+                } catch (error) {
+                    console.error(
+                        error instanceof Error ? error.message : error,
+                    );
+                    send(socket, { type: 'error', error: 'unavailable' });
+                }
                 return;
             }
 
@@ -370,9 +557,28 @@ export async function start(options: {
             closed = true;
             clearTimeout(authTimer);
             dropSocket(socket, state);
-            void markOffline().catch((error: unknown) => {
-                console.error(error instanceof Error ? error.message : error);
-            });
+            const userId = state.userId;
+            chain = chain
+                .then(async () => {
+                    await markOffline();
+                    if (!userId) return;
+                    const stopped = await typing.disconnect(
+                        userId,
+                        connectionId,
+                    );
+                    for (const item of stopped) {
+                        await publishTyping(item.peers, {
+                            conversation_id: item.conversationId,
+                            user_id: userId,
+                            typing: false,
+                        });
+                    }
+                })
+                .catch((error: unknown) => {
+                    console.error(
+                        error instanceof Error ? error.message : error,
+                    );
+                });
         });
     });
 
