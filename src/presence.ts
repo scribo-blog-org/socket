@@ -53,10 +53,18 @@ export class PresenceStore {
         return out;
     }
 
-    async publish(userId: string, online: boolean): Promise<void> {
+    async publish(
+        userId: string,
+        online: boolean,
+        at?: Date,
+    ): Promise<void> {
         await this.redis.publish(
             PRESENCE_CHANNEL,
-            JSON.stringify({ userId, online }),
+            JSON.stringify({
+                userId,
+                online,
+                ...(at ? { at: at.toISOString() } : {}),
+            }),
         );
     }
 }

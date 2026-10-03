@@ -10,6 +10,7 @@ import { TypingStore } from './typing';
 
 const EVENTS_CHANNEL = 'scribo:events';
 const PRESENCE_REFRESH_MS = 15000;
+const ACTIVITY_REFRESH_MS = 60_000;
 
 type ClientState = {
     userId: string | null;
@@ -140,7 +141,7 @@ export async function start(options: {
 
     subscriber.on('message', (channel, message) => {
         if (channel === PRESENCE_CHANNEL) {
-            let parsed: { userId?: unknown; online?: unknown };
+            let parsed: { userId?: unknown; online?: unknown; at?: unknown };
             try {
                 parsed = JSON.parse(message) as typeof parsed;
             } catch {
@@ -153,6 +154,7 @@ export async function start(options: {
                 type: 'presence',
                 user: parsed.userId,
                 online: parsed.online,
+                ...(typeof parsed.at === 'string' ? { at: parsed.at } : {}),
             };
             for (const socket of authed) {
                 send(socket, body);
@@ -244,6 +246,7 @@ export async function start(options: {
         let closed = false;
         let presenceJoined = false;
         let presenceTimer: ReturnType<typeof setInterval> | null = null;
+        let activityTimer: ReturnType<typeof setInterval> | null = null;
         let chain = Promise.resolve();
         const authTimer = setTimeout(() => {
             if (!state.userId) socket.close(4001, 'unauthorized');
@@ -264,17 +267,40 @@ export async function start(options: {
             if (becameOnline) await presence.publish(userId, true);
         };
 
+        const stopActivityTimer = () => {
+            if (!activityTimer) return;
+            clearInterval(activityTimer);
+            activityTimer = null;
+        };
+
+        const rememberActivity = (userId: string) =>
+            conversations.touchLastActivity(userId);
+
         const markOffline = async () => {
             if (presenceTimer) {
                 clearInterval(presenceTimer);
                 presenceTimer = null;
             }
+            stopActivityTimer();
             authed.delete(socket);
             const userId = state.userId;
-            if (!userId || !presenceJoined) return;
+            if (!userId) return;
+            let activity: { at: Date; isPublic: boolean } | null = null;
+            try {
+                activity = await rememberActivity(userId);
+            } catch (error) {
+                console.error(error instanceof Error ? error.message : error);
+            }
+            if (!presenceJoined) return;
             presenceJoined = false;
             const becameOffline = await presence.leave(userId, connectionId);
-            if (becameOffline) await presence.publish(userId, false);
+            if (becameOffline) {
+                await presence.publish(
+                    userId,
+                    false,
+                    activity?.isPublic ? activity.at : undefined,
+                );
+            }
         };
 
         const handle = async (raw: string) => {
@@ -319,6 +345,20 @@ export async function start(options: {
                             );
                         });
                     }, PRESENCE_REFRESH_MS);
+                }
+                if (!activityTimer) {
+                    activityTimer = setInterval(() => {
+                        if (!state.userId || closed) return;
+                        void rememberActivity(state.userId).catch(
+                            (error: unknown) => {
+                                console.error(
+                                    error instanceof Error
+                                        ? error.message
+                                        : error,
+                                );
+                            },
+                        );
+                    }, ACTIVITY_REFRESH_MS);
                 }
                 send(socket, { type: 'auth', ok: true });
                 return;
