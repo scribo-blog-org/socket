@@ -1,48 +1,69 @@
 # Scribo socket
 
-WebSocket-процесс для сообщений и присутствия. HTTP API он не заменяет и сообщения в базу не пишет. Новое сообщение создаёт backend, публикует событие в Redis, а этот процесс доставляет его тем сокетам, которые подписаны на комнату.
+Realtime delivery for the Scribo blog: chat messages, typing indicators and presence. This process is not a second API. It never writes a message, a post or a profile. The backend owns all state; this service only pushes events to the sockets that are entitled to see them.
 
-Прод: `wss://scribo-blog.duckdns.org/ws`. Снаружи отдельного порта нет. Nginx проксирует путь `/ws` на контейнер `socket:3002` и держит соединение с заголовками `Upgrade`.
+Production: `wss://scribo.pp.ua/ws`. Staging: `wss://scribo-stage.pp.ua/ws`. No port is published to the internet. The nginx container in the `edge` stack proxies the `/ws` path to `<stack>-socket:3002` and keeps the connection open with the `Upgrade` headers.
 
-## Место в системе
+## Where it sits
 
 ```
-браузер  --WSS /ws-->  nginx  -->  этот процесс :3002
-                                     ├─ проверка access JWT, только публичный ключ RS256
-                                     ├─ MongoDB Atlas: участник беседы или нет
-                                     └─ Redis: подписка на scribo:events и присутствие
+browser  --WSS /ws-->  nginx  -->  this process :3002
+                                   |- access JWT check, RS256 public key only
+                                   |- MongoDB: conversation membership
+                                   `- Redis: scribo:events, presence, typing
 ```
 
-Backend публикует в канал `scribo:events` JSON `{ room, event, payload }`. Комнаты: `user:<id>` и `chat:<id>`. Сокет, который в этой комнате, получает событие.
+The backend publishes `{ room, event, payload }` as JSON into the Redis channel `scribo:events`. Rooms are `user:<id>` and `chat:<id>`. Every socket subscribed to that room receives the event. Presence and typing use their own channels and their own Redis keys.
 
-Присутствие хранится в Redis и рассылается по отдельному каналу. После пересоздания Redis онлайн пропадает: у Redis в compose нет снимков и AOF.
+Nothing here survives a Redis restart: the Redis instance in compose runs without RDB snapshots and without AOF. After the container is recreated, presence and typing start empty. That is expected, both are ephemeral by nature.
 
-При старте одна строка: порт, Redis, хост и имя Mongo. Ошибки соединения пишутся в stderr. Журнала каждого кадра нет.
+Startup prints a single line with the port, the Redis target and the Mongo host and database name. Connection failures go to stderr. Individual frames are not logged.
 
-## Что принимает сокет
+## Repositories
 
-Клиент шлёт JSON.
-
-| Тип | Смысл |
+| Repository | Role |
 | --- | --- |
-| `auth` | Access JWT. Без него подписка на комнаты не проходит |
-| `subscribe` | Войти в `user:<id>` или `chat:<id>`. Для чата пользователь должен быть участником |
-| `unsubscribe` | Выйти из комнаты |
-| `presence:query` | Спросить, кто из переданных id сейчас онлайн |
+| `frontend` | Next.js client; opens the socket and subscribes to rooms |
+| `backend` | NestJS HTTP API; owns the data and publishes the events |
+| `socket` | this repository |
+| `infra` | compose files, nginx, certificates, server scripts |
 
-Чужой чат не открывается: перед `subscribe` на `chat:<id>` процесс читает документ беседы в Mongo и сверяет `participants`. Других коллекций он не меняет.
+## How it talks to the rest of the system
 
-`GET /health` на этом же порту отвечает `{ "ok": true }`. Это проверка контейнера, не публичный `/health` сайта. Публичный `/health` обслуживает backend.
+The browser authenticates with the same access JWT it uses for the HTTP API. This process verifies it with the RS256 **public** key and nothing else. It cannot issue tokens and it has no refresh secret.
 
-## Чего здесь нет
+Sending a message is still an HTTP call to the backend. The backend writes it to Mongo, then publishes an event; this service fans it out. The client therefore never has to choose between "did the write succeed" and "did the socket deliver it" — the write is the HTTP response, the socket is only the notification.
 
-Нет закрытого ключа и нет секрета refresh. Если в окружение попали `JWT_PRIVATE_KEY` или `JWT_REFRESH_KEY`, процесс завершается при старте. Подписывать токены он не должен.
+Membership is checked here, not trusted from the client. Before a socket may join `chat:<id>`, the process reads the conversation document from the same MongoDB the backend uses and verifies that the user is in `participants`. It performs no writes other than refreshing the user's last-activity timestamp.
 
-Нет записи сообщений, лайков, постов и почты. Это backend.
+## Protocol
 
-## Локальный запуск
+The client sends JSON control frames.
 
-Node.js 22. Рядом должны быть Redis и та же Mongo, что у API. Публичный ключ — тот же PEM, что `JWT_PUBLIC_KEY` у backend.
+| Type | Meaning |
+| --- | --- |
+| `auth` | Access JWT. Until it succeeds, no room may be joined |
+| `subscribe` | Join `user:<id>` or `chat:<id>`. Chat rooms require membership |
+| `unsubscribe` | Leave a room |
+| `presence:query` | Ask which of the given user ids are online right now |
+| `typing` | Report that the user is typing in a conversation, or stopped |
+| `typing:query` | Ask who is currently typing in the conversations this user takes part in |
+
+Typing is rate limited on the server, not only in the client. A pulse refreshes a short-lived Redis key (`TYPING_TTL_MS`, two seconds) and is fanned out only to the other participants of that conversation; a gate key drops pulses that arrive faster than the allowed rate. When the key expires, or the socket disconnects, a stop event is published automatically, so a client that closes the tab mid-word does not leave a stuck indicator.
+
+Presence works the same way: a set of online connection ids per user, refreshed every 15 seconds while the socket is open, with an activity timestamp written back to Mongo at most once a minute.
+
+`GET /health` on the same port returns `{ "ok": true }`. This is the container healthcheck, not the public `/health` of the site — that one is served by the backend.
+
+## What is deliberately absent
+
+There is no private key and no refresh secret. If `JWT_PRIVATE_KEY` or `JWT_REFRESH_KEY` appear in the environment, the process exits during startup rather than running with credentials it must never hold.
+
+There is no message persistence, no mail, no business logic. All of that belongs to the backend.
+
+## Running locally
+
+Node.js 22. A Redis instance and the same MongoDB the API uses must be reachable. The public key must be the exact PEM that the backend has in `JWT_PUBLIC_KEY`.
 
 ```bash
 npm install
@@ -50,31 +71,34 @@ npm run build
 npm start
 ```
 
-Слушает `0.0.0.0` и `PORT`, по умолчанию `3002`.
+Listens on `0.0.0.0` and `PORT`, `3002` by default.
 
-| Переменная | Смысл |
+| Variable | Meaning |
 | --- | --- |
-| `PORT` | Порт, по умолчанию `3002` |
-| `REDIS_URL` | С хоста `redis://127.0.0.1:6379`. В compose `redis://redis:6379` |
-| `JWT_PUBLIC_KEY` | Публичный ключ RS256, PEM |
-| `MONGODB_URI` | Необязательно. Полная строка, например локальная Mongo из `infra/local/compose.yml`; тогда `DB_USER`, `DB_PASSWORD`, `DB_HOST` не нужны, `DB_NAME` остаётся обязательным |
-| `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_NAME` | Доступ к Mongo. `DB_HOST` — хост кластера, без схемы и без учётных данных |
+| `PORT` | Listen port, `3002` by default |
+| `REDIS_URL` | `redis://127.0.0.1:6379` from the host, `redis://redis:6379` inside compose |
+| `JWT_PUBLIC_KEY` | RS256 public key, PEM |
+| `MONGODB_URI` | Optional full connection string. When set, `DB_USER`, `DB_PASSWORD` and `DB_HOST` are ignored, but `DB_NAME` is still required |
+| `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_NAME` | Mongo access. `DB_HOST` is the cluster host only, without scheme or credentials |
 
-## Как устроен код
+The quickest local setup is `infra/local`, which brings up Mongo and Redis next to the three applications.
+
+## Layout
 
 ```
 src/
-  index.ts      загрузка конфига, Mongo, старт, SIGTERM
-  config.ts     env, запрет закрытых ключей
-  access.ts     проверка access JWT
-  mongo.ts      один запрос: участник беседы
-  server.ts     HTTP /health, WebSocket, Redis
-  presence.ts   набор онлайн-id в Redis
+  index.ts      config load, Mongo connection, startup, SIGTERM
+  config.ts     environment parsing, refusal of private keys
+  access.ts     access JWT verification
+  mongo.ts      membership lookup, participant lists, last-activity touch
+  server.ts     HTTP /health, WebSocket server, Redis subscriptions
+  presence.ts   online set in Redis
+  typing.ts     typing keys, rate gate and fan-out lists in Redis
 ```
 
-Зависимости узкие: `ws`, `ioredis`, официальный драйвер MongoDB, `jsonwebtoken`. Nest здесь нет.
+Dependencies are deliberately narrow: `ws`, `ioredis`, the official MongoDB driver and `jsonwebtoken`. There is no Nest here, and no framework at all.
 
-## Скрипты
+## Scripts
 
 ```bash
 npm run build
@@ -83,8 +107,10 @@ npm run lint
 npm run test
 ```
 
-`lint` и `test` — заглушки с кодом 0. Отдельного линтера и набора тестов в репозитории нет. Проверка pull request из-за этого не падает.
+`lint` and `test` are placeholders that exit 0. The repository has no linter configuration and no test suite of its own, and the pull request checks are written so that this does not fail the pipeline.
 
-## Выкладка
+## Deployment
 
-Push в `master` собирает образ `ghcr.io/scribo-blog-org/socket` и поднимает сервис `socket` в compose. Pull request в `master` гоняет lint, test и `docker build` без публикации. Машина, nginx и Redis описаны в репозитории `infra`.
+A push to `master` builds `ghcr.io/scribo-blog-org/socket` on an ARM runner, publishes the `latest` and commit-sha tags, and then pulls and restarts the `socket` service of the `prod` stack over SSH. A push to `dev` does the same with the `staging` tag against the `stage` stack. Pull requests run lint, test and a local `docker build` without publishing.
+
+The machine, nginx, Redis and the compose layout are documented in the `infra` repository.
