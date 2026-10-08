@@ -13,7 +13,7 @@ browser  --WSS /ws-->  nginx  -->  this process :3002
                                    `- Redis: scribo:events, presence, typing
 ```
 
-The backend publishes `{ room, event, payload }` as JSON into the Redis channel `scribo:events`. Rooms are `user:<id>` and `chat:<id>`. Every socket subscribed to that room receives the event. Presence and typing use their own channels and their own Redis keys.
+The backend publishes `{ room, event, payload }` as JSON into the Redis channel `scribo:events`. Rooms are `user:<id>`, `chat:<id>` and `admin`. Every socket subscribed to that room receives the event. Presence and typing use their own channels and their own Redis keys.
 
 Nothing here survives a Redis restart: the Redis instance in compose runs without RDB snapshots and without AOF. After the container is recreated, presence and typing start empty. That is expected, both are ephemeral by nature.
 
@@ -43,7 +43,7 @@ The client sends JSON control frames.
 | Type | Meaning |
 | --- | --- |
 | `auth` | Access JWT. Until it succeeds, no room may be joined |
-| `subscribe` | Join `user:<id>` or `chat:<id>`. Chat rooms require membership |
+| `subscribe` | Join `user:<id>`, `chat:<id>` or `admin`. Chat rooms require membership, `admin` requires a staff role read from the database at subscribe time |
 | `unsubscribe` | Leave a room |
 | `presence:query` | Ask which of the given user ids are online right now |
 | `typing` | Report that the user is typing in a conversation, or stopped |
