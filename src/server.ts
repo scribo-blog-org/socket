@@ -12,6 +12,13 @@ const EVENTS_CHANNEL = 'scribo:events';
 const PRESENCE_REFRESH_MS = 15000;
 const ACTIVITY_REFRESH_MS = 60_000;
 
+// The `admin` room carries staff-only events. Access is decided by the role
+// currently stored for the user, so a demoted account stops receiving them on
+// its next subscribe. These are the roles that hold `manage_support` in the
+// backend's role-permissions table; keep the two in step.
+const ADMIN_ROOM = 'admin';
+const ADMIN_ROOM_ROLES = new Set(['admin', 'tech_admin']);
+
 type ClientState = {
     userId: string | null;
     rooms: Set<string>;
@@ -34,7 +41,10 @@ export type SocketServer = {
     close: () => Promise<void>;
 };
 
-function parseRoom(room: string): { kind: 'user' | 'chat'; id: string } | null {
+function parseRoom(
+    room: string,
+): { kind: 'user' | 'chat' | 'admin'; id: string } | null {
+    if (room === ADMIN_ROOM) return { kind: 'admin', id: ADMIN_ROOM };
     const match = /^(user|chat):([^\s:]+)$/.exec(room);
     if (!match) return null;
     return { kind: match[1] as 'user' | 'chat', id: match[2] };
@@ -424,6 +434,36 @@ export async function start(options: {
                             error instanceof Error ? error.message : error,
                         );
                     }
+                    return;
+                }
+                if (room.kind === 'admin') {
+                    try {
+                        const role = await conversations.userRole(userId);
+                        if (!role || !ADMIN_ROOM_ROLES.has(role)) {
+                            send(socket, {
+                                type: 'error',
+                                error: 'forbidden',
+                                room: message.room,
+                            });
+                            return;
+                        }
+                    } catch (error) {
+                        console.error(
+                            error instanceof Error ? error.message : error,
+                        );
+                        send(socket, {
+                            type: 'error',
+                            error: 'unavailable',
+                            room: message.room,
+                        });
+                        return;
+                    }
+                    join(ADMIN_ROOM, socket, state);
+                    send(socket, {
+                        type: 'subscribe',
+                        ok: true,
+                        room: message.room,
+                    });
                     return;
                 }
                 try {
