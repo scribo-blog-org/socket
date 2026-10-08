@@ -9,8 +9,19 @@ import { PRESENCE_CHANNEL, PresenceStore } from './presence';
 import { TypingStore } from './typing';
 
 const EVENTS_CHANNEL = 'scribo:events';
-const PRESENCE_REFRESH_MS = 15000;
+// A client reports whether the app is in the foreground with every ping. A
+// connection that stays silent this long is considered dead (sleep, lost
+// network, killed browser) and is dropped, which also takes the user offline.
+const PRESENCE_CHECK_MS = 15000;
+const PING_TIMEOUT_MS = 45_000;
 const ACTIVITY_REFRESH_MS = 60_000;
+
+// The `admin` room carries staff-only events. Access is decided by the role
+// currently stored for the user, so a demoted account stops receiving them on
+// its next subscribe. These are the roles that hold `manage_support` in the
+// backend's role-permissions table; keep the two in step.
+const ADMIN_ROOM = 'admin';
+const ADMIN_ROOM_ROLES = new Set(['admin', 'tech_admin']);
 
 type ClientState = {
     userId: string | null;
@@ -18,7 +29,8 @@ type ClientState = {
 };
 
 type Control =
-    | { type: 'auth'; access?: unknown }
+    | { type: 'auth'; access?: unknown; active?: unknown }
+    | { type: 'ping'; active?: unknown }
     | { type: 'subscribe'; room?: unknown }
     | { type: 'unsubscribe'; room?: unknown }
     | { type: 'presence:query'; id?: unknown; users?: unknown }
@@ -34,7 +46,10 @@ export type SocketServer = {
     close: () => Promise<void>;
 };
 
-function parseRoom(room: string): { kind: 'user' | 'chat'; id: string } | null {
+function parseRoom(
+    room: string,
+): { kind: 'user' | 'chat' | 'admin'; id: string } | null {
+    if (room === ADMIN_ROOM) return { kind: 'admin', id: ADMIN_ROOM };
     const match = /^(user|chat):([^\s:]+)$/.exec(room);
     if (!match) return null;
     return { kind: match[1] as 'user' | 'chat', id: match[2] };
@@ -246,6 +261,11 @@ export async function start(options: {
         let closed = false;
         let presenceJoined = false;
         let presenceTimer: ReturnType<typeof setInterval> | null = null;
+        // Online means the app is in the foreground, so a connection that is
+        // open but backgrounded stays out of the presence set.
+        let active = false;
+        let pinged = false;
+        let lastPingAt = Date.now();
         let activityTimer: ReturnType<typeof setInterval> | null = null;
         let chain = Promise.resolve();
         const authTimer = setTimeout(() => {
@@ -276,15 +296,7 @@ export async function start(options: {
         const rememberActivity = (userId: string) =>
             conversations.touchLastActivity(userId);
 
-        const markOffline = async () => {
-            if (presenceTimer) {
-                clearInterval(presenceTimer);
-                presenceTimer = null;
-            }
-            stopActivityTimer();
-            authed.delete(socket);
-            const userId = state.userId;
-            if (!userId) return;
+        const leavePresence = async (userId: string) => {
             let activity: { at: Date; isPublic: boolean } | null = null;
             try {
                 activity = await rememberActivity(userId);
@@ -300,6 +312,29 @@ export async function start(options: {
                     false,
                     activity?.isPublic ? activity.at : undefined,
                 );
+            }
+        };
+
+        const markOffline = async () => {
+            if (presenceTimer) {
+                clearInterval(presenceTimer);
+                presenceTimer = null;
+            }
+            stopActivityTimer();
+            authed.delete(socket);
+            active = false;
+            const userId = state.userId;
+            if (!userId) return;
+            await leavePresence(userId);
+        };
+
+        const setActive = async (userId: string, next: boolean) => {
+            if (closed || next === active) return;
+            active = next;
+            if (next) {
+                await markOnline(userId);
+            } else {
+                await leavePresence(userId);
             }
         };
 
@@ -329,8 +364,9 @@ export async function start(options: {
                 state.userId = userId;
                 clearTimeout(authTimer);
                 authed.add(socket);
+                lastPingAt = Date.now();
                 try {
-                    await markOnline(userId);
+                    await setActive(userId, message.active !== false);
                 } catch (error) {
                     console.error(
                         error instanceof Error ? error.message : error,
@@ -338,17 +374,26 @@ export async function start(options: {
                 }
                 if (!presenceTimer) {
                     presenceTimer = setInterval(() => {
-                        if (!state.userId) return;
+                        if (!state.userId || closed) return;
+                        if (pinged) {
+                            if (Date.now() - lastPingAt > PING_TIMEOUT_MS) {
+                                socket.terminate();
+                            }
+                            return;
+                        }
+                        // Clients from before pings existed cannot renew
+                        // their own presence, so it is renewed for them.
+                        if (!active) return;
                         void markOnline(state.userId).catch((error: unknown) => {
                             console.error(
                                 error instanceof Error ? error.message : error,
                             );
                         });
-                    }, PRESENCE_REFRESH_MS);
+                    }, PRESENCE_CHECK_MS);
                 }
                 if (!activityTimer) {
                     activityTimer = setInterval(() => {
-                        if (!state.userId || closed) return;
+                        if (!state.userId || closed || !active) return;
                         void rememberActivity(state.userId).catch(
                             (error: unknown) => {
                                 console.error(
@@ -361,6 +406,30 @@ export async function start(options: {
                     }, ACTIVITY_REFRESH_MS);
                 }
                 send(socket, { type: 'auth', ok: true });
+                return;
+            }
+
+            if (message.type === 'ping') {
+                if (!state.userId) {
+                    send(socket, { type: 'error', error: 'unauthorized' });
+                    return;
+                }
+                pinged = true;
+                lastPingAt = Date.now();
+                try {
+                    if (typeof message.active === 'boolean') {
+                        if (message.active === active && active) {
+                            await markOnline(state.userId);
+                        } else {
+                            await setActive(state.userId, message.active);
+                        }
+                    }
+                } catch (error) {
+                    console.error(
+                        error instanceof Error ? error.message : error,
+                    );
+                }
+                send(socket, { type: 'pong' });
                 return;
             }
 
@@ -424,6 +493,36 @@ export async function start(options: {
                             error instanceof Error ? error.message : error,
                         );
                     }
+                    return;
+                }
+                if (room.kind === 'admin') {
+                    try {
+                        const role = await conversations.userRole(userId);
+                        if (!role || !ADMIN_ROOM_ROLES.has(role)) {
+                            send(socket, {
+                                type: 'error',
+                                error: 'forbidden',
+                                room: message.room,
+                            });
+                            return;
+                        }
+                    } catch (error) {
+                        console.error(
+                            error instanceof Error ? error.message : error,
+                        );
+                        send(socket, {
+                            type: 'error',
+                            error: 'unavailable',
+                            room: message.room,
+                        });
+                        return;
+                    }
+                    join(ADMIN_ROOM, socket, state);
+                    send(socket, {
+                        type: 'subscribe',
+                        ok: true,
+                        room: message.room,
+                    });
                     return;
                 }
                 try {

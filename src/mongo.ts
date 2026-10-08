@@ -72,6 +72,18 @@ export class Conversations {
         return ids.filter((id) => id !== userId);
     }
 
+    async userRole(userId: string): Promise<string | null> {
+        if (!/^[a-fA-F0-9]{24}$/.test(userId)) return null;
+        const doc = await this.client
+            .db(this.dbName)
+            .collection('users')
+            .findOne(
+                { _id: new ObjectId(userId) },
+                { projection: { role: 1 } },
+            );
+        return typeof doc?.role === 'string' ? doc.role : null;
+    }
+
     async touchLastActivity(
         userId: string,
         at = new Date(),
