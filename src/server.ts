@@ -9,17 +9,10 @@ import { PRESENCE_CHANNEL, PresenceStore } from './presence';
 import { TypingStore } from './typing';
 
 const EVENTS_CHANNEL = 'scribo:events';
-// A client reports whether the app is in the foreground with every ping. A
-// connection that stays silent this long is considered dead (sleep, lost
-// network, killed browser) and is dropped, which also takes the user offline.
 const PRESENCE_CHECK_MS = 15000;
 const PING_TIMEOUT_MS = 45_000;
 const ACTIVITY_REFRESH_MS = 60_000;
 
-// The `admin` room carries staff-only events. Access is decided by the role
-// currently stored for the user, so a demoted account stops receiving them on
-// its next subscribe. These are the roles that hold `manage_support` in the
-// backend's role-permissions table; keep the two in step.
 const ADMIN_ROOM = 'admin';
 const ADMIN_ROOM_ROLES = new Set(['admin', 'tech_admin']);
 
@@ -261,8 +254,6 @@ export async function start(options: {
         let closed = false;
         let presenceJoined = false;
         let presenceTimer: ReturnType<typeof setInterval> | null = null;
-        // Online means the app is in the foreground, so a connection that is
-        // open but backgrounded stays out of the presence set.
         let active = false;
         let pinged = false;
         let lastPingAt = Date.now();
@@ -381,8 +372,6 @@ export async function start(options: {
                             }
                             return;
                         }
-                        // Clients from before pings existed cannot renew
-                        // their own presence, so it is renewed for them.
                         if (!active) return;
                         void markOnline(state.userId).catch((error: unknown) => {
                             console.error(
