@@ -2,6 +2,7 @@ import {
     createReadStream,
     createWriteStream,
     mkdirSync,
+    readFileSync,
     readdirSync,
     renameSync,
     statSync,
@@ -28,8 +29,20 @@ const MAX_STRING = 2000;
 const PRUNE_EVERY_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+export function packageVersion(cwd = process.cwd()): string | undefined {
+    try {
+        const pkg = JSON.parse(
+            readFileSync(join(cwd, 'package.json'), 'utf8'),
+        ) as { version?: string };
+        return pkg.version || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 export type RuntimeLogOptions = {
     service: string;
+    version?: string;
     dir?: string;
     level?: RuntimeLevel;
     fileBytes?: number;
@@ -49,6 +62,7 @@ export function runtimeLogOptionsFromEnv(
     const days = Number(env.LOG_RETENTION_DAYS);
     return {
         service,
+        version: packageVersion(),
         dir: env.LOG_DIR || undefined,
         level: level in ORDER ? (level as RuntimeLevel) : 'info',
         fileBytes: mb(env.LOG_FILE_MB, 20),
@@ -144,6 +158,9 @@ export class RuntimeLog {
                 ts: now.toISOString(),
                 level,
                 service: this.options.service,
+                ...(this.options.version
+                    ? { version: this.options.version }
+                    : {}),
                 msg,
                 ...((redact(fields ?? {}) as Record<string, unknown>) ?? {}),
             }) + '\n';
@@ -178,6 +195,9 @@ export class RuntimeLog {
                 ts: new Date().toISOString(),
                 level: 'error',
                 service: this.options.service,
+                ...(this.options.version
+                    ? { version: this.options.version }
+                    : {}),
                 msg: 'runtime log file disabled',
                 error: message,
             }) + '\n',
@@ -252,6 +272,9 @@ export class RuntimeLog {
                     ts: new Date().toISOString(),
                     level: 'warn',
                     service: this.options.service,
+                    ...(this.options.version
+                        ? { version: this.options.version }
+                        : {}),
                     msg: 'runtime log prune failed',
                     error:
                         error instanceof Error ? error.message : String(error),
