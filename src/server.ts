@@ -7,6 +7,7 @@ import type { SocketConfig } from './config';
 import { Conversations } from './mongo';
 import { PRESENCE_CHANNEL, PresenceStore } from './presence';
 import { TypingStore } from './typing';
+import { rlog } from './rlog';
 
 const EVENTS_CHANNEL = 'scribo:events';
 // A client reports whether the app is in the foreground with every ping. A
@@ -119,11 +120,19 @@ export async function start(options: {
     >();
     const authed = new Set<WebSocket>();
     redis.on('error', (error: Error) => {
-        console.error(`redis ${error.message}`);
+        rlog.error('redis error', { error });
     });
     subscriber.on('error', (error: Error) => {
-        console.error(`redis ${error.message}`);
+        rlog.error('redis error', { error });
     });
+    for (const [name, client] of [
+        ['redis', redis],
+        ['redis subscriber', subscriber],
+    ] as const) {
+        client.on('close', () => rlog.warn(`${name} connection closed`));
+        client.on('reconnecting', () => rlog.warn(`${name} reconnecting`));
+        client.on('ready', () => rlog.info(`${name} ready`));
+    }
     await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
             () => reject(new Error('redis connection timed out')),
@@ -258,6 +267,13 @@ export async function start(options: {
     wss.on('connection', (socket) => {
         const state: ClientState = { userId: null, rooms: new Set() };
         const connectionId = randomUUID();
+        socket.on('error', (error) =>
+            rlog.warn('socket error', {
+                error,
+                connection: connectionId,
+                user: state.userId,
+            }),
+        );
         let closed = false;
         let presenceJoined = false;
         let presenceTimer: ReturnType<typeof setInterval> | null = null;
@@ -301,7 +317,7 @@ export async function start(options: {
             try {
                 activity = await rememberActivity(userId);
             } catch (error) {
-                console.error(error instanceof Error ? error.message : error);
+                rlog.error('presence activity update failed', { error, user: state.userId, connection: connectionId });
             }
             if (!presenceJoined) return;
             presenceJoined = false;
@@ -358,6 +374,7 @@ export async function start(options: {
                     return;
                 }
                 if (state.userId && state.userId !== userId) {
+                    rlog.warn('auth user mismatch', { connection: connectionId, user: state.userId, attempted: userId });
                     send(socket, { type: 'error', error: 'forbidden' });
                     return;
                 }
@@ -368,9 +385,7 @@ export async function start(options: {
                 try {
                     await setActive(userId, message.active !== false);
                 } catch (error) {
-                    console.error(
-                        error instanceof Error ? error.message : error,
-                    );
+                    rlog.error('auth presence failed', { error, user: state.userId, connection: connectionId });
                 }
                 if (!presenceTimer) {
                     presenceTimer = setInterval(() => {
@@ -385,9 +400,7 @@ export async function start(options: {
                         // their own presence, so it is renewed for them.
                         if (!active) return;
                         void markOnline(state.userId).catch((error: unknown) => {
-                            console.error(
-                                error instanceof Error ? error.message : error,
-                            );
+                            rlog.error('presence renew failed', { error, user: state.userId, connection: connectionId });
                         });
                     }, PRESENCE_CHECK_MS);
                 }
@@ -396,11 +409,7 @@ export async function start(options: {
                         if (!state.userId || closed || !active) return;
                         void rememberActivity(state.userId).catch(
                             (error: unknown) => {
-                                console.error(
-                                    error instanceof Error
-                                        ? error.message
-                                        : error,
-                                );
+                                rlog.error('activity refresh failed', { error, user: state.userId, connection: connectionId });
                             },
                         );
                     }, ACTIVITY_REFRESH_MS);
@@ -425,9 +434,7 @@ export async function start(options: {
                         }
                     }
                 } catch (error) {
-                    console.error(
-                        error instanceof Error ? error.message : error,
-                    );
+                    rlog.error('ping handling failed', { error, user: state.userId, connection: connectionId });
                 }
                 send(socket, { type: 'pong' });
                 return;
@@ -447,9 +454,7 @@ export async function start(options: {
                         users: online,
                     });
                 } catch (error) {
-                    console.error(
-                        error instanceof Error ? error.message : error,
-                    );
+                    rlog.error('presence query failed', { error, user: state.userId, connection: connectionId });
                     send(socket, { type: 'error', error: 'unavailable' });
                 }
                 return;
@@ -489,9 +494,7 @@ export async function start(options: {
                     try {
                         await pushTypingSnapshot(socket, room.id);
                     } catch (error) {
-                        console.error(
-                            error instanceof Error ? error.message : error,
-                        );
+                        rlog.error('typing snapshot failed', { error, user: state.userId, connection: connectionId });
                     }
                     return;
                 }
@@ -507,9 +510,7 @@ export async function start(options: {
                             return;
                         }
                     } catch (error) {
-                        console.error(
-                            error instanceof Error ? error.message : error,
-                        );
+                        rlog.error('admin room check failed', { error, user: state.userId, connection: connectionId });
                         send(socket, {
                             type: 'error',
                             error: 'unavailable',
@@ -539,9 +540,7 @@ export async function start(options: {
                         return;
                     }
                 } catch (error) {
-                    console.error(
-                        error instanceof Error ? error.message : error,
-                    );
+                    rlog.error('chat room check failed', { error, user: state.userId, connection: connectionId });
                     send(socket, {
                         type: 'error',
                         error: 'unavailable',
@@ -566,9 +565,7 @@ export async function start(options: {
                         })),
                     });
                 } catch (error) {
-                    console.error(
-                        error instanceof Error ? error.message : error,
-                    );
+                    rlog.error('typing query failed', { error, user: state.userId, connection: connectionId });
                     send(socket, { type: 'error', error: 'unavailable' });
                 }
                 return;
@@ -615,9 +612,7 @@ export async function start(options: {
                         typing: true,
                     });
                 } catch (error) {
-                    console.error(
-                        error instanceof Error ? error.message : error,
-                    );
+                    rlog.error('typing update failed', { error, user: state.userId, connection: connectionId });
                     send(socket, { type: 'error', error: 'unavailable' });
                 }
                 return;
@@ -647,7 +642,7 @@ export async function start(options: {
             }
             const raw = data.toString();
             chain = chain.then(() => handle(raw)).catch((error: unknown) => {
-                console.error(error instanceof Error ? error.message : error);
+                rlog.error('message handler failed', { error, user: state.userId, connection: connectionId });
                 send(socket, { type: 'error', error: 'unavailable' });
             });
         });
@@ -674,18 +669,19 @@ export async function start(options: {
                     }
                 })
                 .catch((error: unknown) => {
-                    console.error(
-                        error instanceof Error ? error.message : error,
-                    );
+                    rlog.error('disconnect cleanup failed', { error, user: state.userId, connection: connectionId });
                 });
         });
     });
 
     await new Promise<void>((resolve) => {
         server.listen(config.port, '0.0.0.0', () => {
-            console.log(
-                `socket ready port=${config.port} redis connected mongo connected host=${config.dbHost || 'local-uri'} db=${config.dbName}`,
-            );
+            rlog.info('socket ready', {
+                port: config.port,
+                db_host: config.dbHost || 'local-uri',
+                db: config.dbName,
+                log_dir: process.env.LOG_DIR ?? null,
+            });
             resolve();
         });
     });

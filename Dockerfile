@@ -12,6 +12,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
+RUN mkdir -p /app/logs && chown node:node /app/logs
 USER node
 EXPOSE 3002
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
